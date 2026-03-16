@@ -1,7 +1,7 @@
 # Cargo.toml — SCON: Schema-Compact Object Notation
 [package]
 name = "scon"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "SCON — Schema-Compact Object Notation: human-readable format with 59-66% structural dedup, single-pass tape decoder"
 license = "MIT"
