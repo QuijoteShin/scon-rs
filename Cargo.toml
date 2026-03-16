@@ -1,0 +1,25 @@
+# Cargo.toml — SCON: Schema-Compact Object Notation
+[package]
+name = "scon"
+version = "1.0.0"
+edition = "2021"
+description = "SCON — Schema-Compact Object Notation: human-readable serialization with structural dedup"
+license = "MIT"
+repository = "https://github.com/QuijoteShin/scon-rs"
+homepage = "https://github.com/QuijoteShin/scon-rs"
+documentation = "https://docs.rs/scon"
+keywords = ["serialization", "json-alternative", "schema", "dedup", "parser"]
+categories = ["encoding", "parser-implementations"]
+readme = "README.md"
+
+[dependencies]
+indexmap = "2"
+ahash = "0.8"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+itoa = "1"
+ryu = "1"
+memchr = "2"
+compact_str = "0.9"
+bumpalo = "3"
