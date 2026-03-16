@@ -2,7 +2,7 @@
 
 **SCON — Schema-Compact Object Notation**
 
-A human-readable data serialization format with structural deduplication. Smaller than JSON, faster to parse, no binary encoding.
+A human-readable data serialization format with structural deduplication. 59-66% payload reduction, 64% fewer LLM tokens, no binary encoding.
 
 [![Crates.io](https://img.shields.io/crates/v/scon.svg)](https://crates.io/crates/scon)
 [![docs.rs](https://docs.rs/scon/badge.svg)](https://docs.rs/scon)
@@ -33,15 +33,19 @@ assert_eq!(parsed, obj);
 
 ## Performance
 
-The tape decoder beats simd-json on 2/3 benchmark datasets:
+Single-pass tape decoder, 500 iterations, release mode, tracking allocator:
 
-| Dataset | vs simd-json | vs serde_json |
-|---------|-------------|---------------|
-| OpenAPI | **21% faster** | 53% faster |
-| DB | **18% faster** | 35% faster |
-| Config | 8% slower | 40% faster |
+| Dataset | Decode | Peak memory | Payload reduction |
+|---------|-------:|----------:|----------------:|
+| OpenAPI (71 endpoints) | 0.195 ms | 3,874 KB | **-66% (dedup)** |
+| DB (24 DDL schemas) | 0.045 ms | 3,512 KB | **-29%** |
+| Config (40 records) | 0.292 ms | 4,111 KB | -8% |
+| ISA-95 (equipment hierarchy) | 0.011 ms | 4,568 KB | **-87% (dedup)** |
 
-500 iterations, release mode, tracking allocator. Full methodology: [DOI 10.5281/zenodo.14733092](https://doi.org/10.5281/zenodo.14733092)
+LLM token efficiency (cl100k_base): **64% fewer tokens** on OpenAPI specs — less context window waste for RAG pipelines and tool-use agents.
+
+Full methodology: [DOI 10.5281/zenodo.14733092](https://doi.org/10.5281/zenodo.14733092)
+Benchmarks, optimization log (21 phases), and industrial protocol fixtures: [github.com/QuijoteShin/scon](https://github.com/QuijoteShin/scon)
 
 ## Format
 
