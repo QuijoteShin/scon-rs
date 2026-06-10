@@ -149,7 +149,25 @@ struct ArrayHeader<'a> {
     length: usize,
     delimiter: char,
     fields: Option<Vec<&'a str>>,
+    schema_ref: Option<&'a str>,
     inline_values: Option<&'a str>,
+}
+
+// True si hay un `;` fuera de comillas (separador real de minificado). Respeta `\"` dentro de strings.
+fn has_unquoted_semicolon(s: &str) -> bool {
+    let b = s.as_bytes();
+    let mut in_quotes = false;
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'\\' if in_quotes && i + 1 < b.len() => { i += 2; continue; }
+            b'"' => in_quotes = !in_quotes,
+            b';' if !in_quotes => return true,
+            _ => {}
+        }
+        i += 1;
+    }
+    false
 }
 
 pub struct TapeDecoder {
@@ -174,8 +192,10 @@ impl TapeDecoder {
     pub fn decode<'a>(&mut self, input: &'a str) -> Result<Tape<'a>, String> {
         self.resolved_strs.clear();
 
-        if !input.contains('\n') && input.contains(';') {
-            // Minified — delegate to owned decoder (which handles schema defs)
+        if !input.contains('\n') && has_unquoted_semicolon(input) {
+            // Minified — delegate to owned decoder (which handles schema defs).
+            // El `;` debe estar FUERA de comillas: un valor string en una sola línea (p.ej.
+            // `x: "FREQ=WEEKLY\;BYDAY=MO"`) no es minificado y no debe rutearse acá.
             let val = Decoder::new().decode(input)?;
             return Ok(self.owned_to_tape(&val));
         }
@@ -337,6 +357,22 @@ impl TapeDecoder {
 
         if let Some(ref fields) = header.fields {
             return self.emit_tabular_array_streaming(lines, base_depth, header.length, fields, header.delimiter, tape);
+        }
+        if let Some(ref_str) = header.schema_ref {
+            if let Some(colon) = ref_str.find(':') {
+                let type_prefix = &ref_str[..colon];
+                let name = &ref_str[colon + 1..];
+                if let Some(def_type) = crate::schema_registry::DefType::from_prefix(type_prefix) {
+                    let field_names = self.helper.registry.tabular_fields(def_type, name)?;
+                    let resolved_fields: Vec<&str> = field_names.iter().map(|s: &compact_str::CompactString| {
+                        let idx = self.resolved_strs.len();
+                        self.resolved_strs.push(s.to_string());
+                        unsafe { &*(self.resolved_strs[idx].as_str() as *const str) }
+                    }).collect();
+                    return self.emit_tabular_array_streaming(lines, base_depth, header.length, &resolved_fields, header.delimiter, tape);
+                }
+            }
+            return Err(format!("Invalid tabular schema ref: @{}", ref_str));
         }
 
         self.emit_expanded_array_streaming(lines, base_depth, header.length, tape)
@@ -593,6 +629,7 @@ impl TapeDecoder {
         let length: usize = bracket_content.parse().unwrap_or(0);
 
         let mut fields = None;
+        let mut schema_ref = None;
         let after_bracket = &content[bracket_end + 1..];
         if after_bracket.starts_with('{') {
             if let Some(brace_end) = after_bracket.find('}') {
@@ -600,13 +637,19 @@ impl TapeDecoder {
                 let parts = self.helper.split_top_level(fields_str, delimiter);
                 fields = Some(parts.into_iter().map(|s| s.trim()).collect());
             }
+        } else if after_bracket.starts_with("@s:") || after_bracket.starts_with("@r:") || after_bracket.starts_with("@sec:") {
+            let ref_start = 1;
+            let ref_end = after_bracket[ref_start..].find(':').map(|p| p + ref_start)?;
+            let after_type = ref_end + 1;
+            let name_end = after_bracket[after_type..].find(':').map(|p| p + after_type).unwrap_or(after_bracket.len());
+            schema_ref = Some(after_bracket[1..name_end].trim());
         }
 
         let colon_pos = content.rfind(':')?;
         let after_colon = content[colon_pos + 1..].trim();
         let inline_values = if !after_colon.is_empty() { Some(after_colon) } else { None };
 
-        Some(ArrayHeader { key, length, delimiter, fields, inline_values })
+        Some(ArrayHeader { key, length, delimiter, fields, schema_ref, inline_values })
     }
 
     fn parse_key<'a>(&mut self, content: &'a str) -> Result<(&'a str, usize), String> {
