@@ -202,3 +202,48 @@ fn custom_indent() {
         assert!(r4.contains_key("a"));
     }
 }
+
+#[test]
+fn expanded_list_item_first_field_array_roundtrips() {
+    let data = obj(vec![(
+        "sites",
+        Value::Array(vec![obj(vec![
+            ("areas", Value::Array(vec![
+                obj(vec![
+                    ("description", s("A")),
+                    ("tags", Value::Array(vec![s("x"), s("y")])),
+                ]),
+                obj(vec![
+                    ("description", s("B")),
+                    ("tags", Value::Array(vec![s("z")])),
+                ]),
+            ])),
+            ("equipmentLevel", s("Site")),
+            ("id", s("SITE-1")),
+        ])]),
+    )]);
+
+    let encoded = encode(&data);
+    assert!(encoded.contains("- areas[2]:"));
+    assert!(!encoded.contains("- areas:"));
+
+    let decoded = decode(&encoded).unwrap();
+    assert_eq!(decoded, data);
+
+    let encoded_8 = encode_with_indent(&data, 8);
+    assert!(encoded_8.contains("\n        - areas[2]:"));
+    assert!(encoded_8.contains("\n                - description: A"));
+    assert!(encoded_8.contains("\n                        tags[2]: x, y"));
+}
+
+#[test]
+fn serde_json_input_preserves_field_order() {
+    let json: serde_json::Value = serde_json::from_str(r#"{"z":0,"a":1,"m":2}"#).unwrap();
+    let value = Value::from(&json);
+    let encoded = encode(&value);
+    let lines: Vec<&str> = encoded.lines().collect();
+
+    assert_eq!(lines[0], "z: 0");
+    assert_eq!(lines[1], "a: 1");
+    assert_eq!(lines[2], "m: 2");
+}

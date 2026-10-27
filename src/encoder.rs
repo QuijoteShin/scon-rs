@@ -24,6 +24,7 @@
 use crate::value::{Value, SconMap};
 use crate::schema_registry::{SchemaRegistry, DefType};
 use crate::treehash::TreeHash;
+use std::collections::HashMap;
 
 // Lookup tables — branch-free byte classification, L1 cache resident (256 bytes each)
 // UNSAFE_VALUE[b] = true if byte b requires quoting in a SCON value
@@ -231,12 +232,18 @@ impl Encoder {
             return;
         }
 
+        self.write_indent(depth, buf);
+        if let Some(k) = key {
+            self.write_key(k, buf);
+        }
+        self.encode_nonempty_array(arr, depth, buf);
+    }
+
+    fn encode_nonempty_array(&self, arr: &[Value], depth: usize, buf: &mut String) {
+        let len = arr.len();
+
         // Array of primitives → inline
         if arr.iter().all(|v| v.is_primitive()) {
-            self.write_indent(depth, buf);
-            if let Some(k) = key {
-                self.write_key(k, buf);
-            }
             buf.push('[');
             self.write_usize(len, buf);
             buf.push_str("]: ");
@@ -252,18 +259,7 @@ impl Encoder {
 
         // Array of objects with uniform keys → tabular
         if let Some(fields) = self.extract_tabular_fields(arr) {
-            self.write_indent(depth, buf);
-            if let Some(k) = key {
-                self.write_key(k, buf);
-            }
-            buf.push('[');
-            self.write_usize(len, buf);
-            buf.push_str("]{");
-            for (i, f) in fields.iter().enumerate() {
-                if i > 0 { buf.push(self.delimiter); }
-                self.write_key(f, buf);
-            }
-            buf.push_str("}:");
+            self.write_tabular_header(len, fields.as_slice(), buf);
             for item in arr {
                 if let Value::Object(obj) = item {
                     buf.push('\n');
@@ -285,10 +281,6 @@ impl Encoder {
         }
 
         // Mixed / expanded array
-        self.write_indent(depth, buf);
-        if let Some(k) = key {
-            self.write_key(k, buf);
-        }
         buf.push('[');
         self.write_usize(len, buf);
         buf.push_str("]:");
@@ -335,6 +327,26 @@ impl Encoder {
         }
     }
 
+    fn write_tabular_header(&self, len: usize, fields: &[&str], buf: &mut String) {
+        buf.push('[');
+        self.write_usize(len, buf);
+        if let Some(schema_name) = self.registry.find_tabular_schema(fields) {
+            buf.push_str("]@s:");
+            buf.push_str(schema_name);
+            buf.push(':');
+            return;
+        }
+
+        buf.push_str("]{");
+        for (i, f) in fields.iter().enumerate() {
+            if i > 0 {
+                buf.push(self.delimiter);
+            }
+            self.write_key(f, buf);
+        }
+        buf.push_str("}:");
+    }
+
     fn encode_object_as_list_item(&self, obj: &SconMap<compact_str::CompactString, Value>, depth: usize, buf: &mut String) {
         if obj.is_empty() {
             self.write_indent(depth, buf);
@@ -357,17 +369,8 @@ impl Encoder {
             Value::Array(arr) if arr.is_empty() => {
                 buf.push_str(": []");
             }
-            Value::Array(arr) if arr.iter().all(|v| v.is_primitive()) => {
-                buf.push('[');
-                self.write_usize(arr.len(), buf);
-                buf.push_str("]: ");
-                for (i, v) in arr.iter().enumerate() {
-                    if i > 0 {
-                        buf.push(self.delimiter);
-                        buf.push(' ');
-                    }
-                    self.write_primitive(v, buf);
-                }
+            Value::Array(arr) => {
+                self.encode_nonempty_array(arr, depth, buf);
             }
             Value::Object(inner) if inner.is_empty() => {
                 buf.push_str(": {}");
@@ -584,11 +587,47 @@ impl Encoder {
     fn detect_repeated_schemas(&mut self, data: &Value) {
         // normalize=false: key order from source (same as PHP default in encode path)
         let result = TreeHash::hash_tree(data, "", 2, false);
-        for entry in result.index.values() {
-            if entry.count >= 2 {
-                let name = generate_schema_name(&entry.path);
-                self.registry.register(DefType::Schema, &name, entry.data.clone());
-            }
+        let repeated: Vec<(&String, &crate::treehash::HashEntry, String)> = result.index.iter()
+            .filter_map(|(hash, entry)| {
+                if entry.count >= 2 {
+                    Some((hash, entry, generate_schema_name(&entry.path)))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let mut base_counts: HashMap<String, usize> = HashMap::new();
+        for (_, _, base) in &repeated {
+            *base_counts.entry(base.clone()).or_insert(0) += 1;
+        }
+
+        for (hash, entry, base) in repeated {
+            let needs_suffix = base_counts.get(&base).copied().unwrap_or(0) > 1
+                || self.schema_name_conflicts(&base, &entry.data);
+            let name = self.resolve_auto_schema_name(&base, hash, &entry.data, needs_suffix);
+            self.registry.register(DefType::Schema, &name, entry.data.clone());
+        }
+    }
+
+    fn schema_name_conflicts(&self, name: &str, data: &Value) -> bool {
+        self.registry.get_all(DefType::Schema)
+            .get(name)
+            .map(|existing| existing != data)
+            .unwrap_or(false)
+    }
+
+    fn resolve_auto_schema_name(&self, base: &str, hash: &str, data: &Value, needs_suffix: bool) -> String {
+        if !needs_suffix {
+            return base.to_string();
+        }
+
+        let short = &hash[..8.min(hash.len())];
+        let candidate = format!("{}_{}", base, short);
+        match self.registry.get_all(DefType::Schema).get(candidate.as_str()) {
+            Some(existing) if existing == data => candidate,
+            Some(_) => format!("{}_{}", base, hash),
+            None => candidate,
         }
     }
 

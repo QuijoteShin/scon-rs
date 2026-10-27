@@ -58,9 +58,14 @@ features:
 endpoints[2]{method,path,status}:
   GET, /api/users, 200
   POST, /api/users, 201
+s:Sensor {sensorType: string, value: number, unit: string}
+readings[2]@s:Sensor:
+  temperature, 23.5, C
+  humidity, 45.2, %
 ```
 
 No braces, no brackets, no repeated keys in uniform arrays, unquoted strings, built-in schema dedup via `@s:name` references.
+In SCON 1.0, simple schemas can also act as reusable tabular headers: the schema's top-level keys, in declaration order, define the column layout.
 
 ## API
 

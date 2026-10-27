@@ -152,6 +152,40 @@ impl SchemaRegistry {
         }
     }
 
+    // Extract ordered field names from a schema for tabular array columns.
+    // Returns the top-level keys in declaration order. Fails if not an object.
+    pub fn tabular_fields(&self, def_type: DefType, name: &str) -> Result<Vec<CompactString>, String> {
+        let store = self.get_store(def_type);
+        let val = store.get(name)
+            .ok_or_else(|| format!("Undefined tabular schema: @{}:{}", def_type.prefix(), name))?;
+        match val {
+            Value::Object(obj) => Ok(obj.keys().cloned().collect()),
+            _ => Err(format!("Schema @{}:{} is not an object, cannot use as tabular fields", def_type.prefix(), name)),
+        }
+    }
+
+    // Find a schema whose top-level keys match a tabular field layout exactly.
+    // In SCON 1.0, simple schemas can serve as reusable tabular headers.
+    pub fn find_tabular_schema(&self, fields: &[&str]) -> Option<&str> {
+        'schemas: for (name, val) in &self.schemas {
+            let obj = match val {
+                Value::Object(obj) => obj,
+                _ => continue,
+            };
+            if obj.len() != fields.len() {
+                continue;
+            }
+            for (field, key) in fields.iter().zip(obj.keys()) {
+                if key.as_str() != *field {
+                    continue 'schemas;
+                }
+            }
+            return Some(name.as_str());
+        }
+
+        None
+    }
+
     pub fn reset(&mut self) {
         self.schemas.clear();
         self.responses.clear();

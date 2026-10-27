@@ -46,6 +46,7 @@ struct ArrayHeader<'a> {
     length: usize,
     delimiter: char,
     fields: Option<Vec<&'a str>>,
+    schema_ref: Option<&'a str>,
     inline_values: Option<&'a str>,
 }
 
@@ -248,6 +249,20 @@ impl<'alloc> BorrowedDecoder<'alloc> {
         if let Some(ref fields) = header.fields {
             return self.decode_tabular_array(index, lines, header.length, fields, header.delimiter);
         }
+        if let Some(ref_str) = header.schema_ref {
+            if let Some(colon) = ref_str.find(':') {
+                let type_prefix = &ref_str[..colon];
+                let name = &ref_str[colon + 1..];
+                if let Some(def_type) = crate::schema_registry::DefType::from_prefix(type_prefix) {
+                    let field_names = self.helper.registry.tabular_fields(def_type, name)?;
+                    let fields_borrowed: Vec<&str> = field_names.iter().map(|s: &compact_str::CompactString| {
+                        &*self.alloc.alloc_str(s.as_str())
+                    }).collect();
+                    return self.decode_tabular_array(index, lines, header.length, &fields_borrowed, header.delimiter);
+                }
+            }
+            return Err(format!("Invalid tabular schema ref: @{}", ref_str));
+        }
 
         self.decode_expanded_array(index, lines, header.length)
     }
@@ -426,6 +441,7 @@ impl<'alloc> BorrowedDecoder<'alloc> {
         let length: usize = bracket_content.parse().unwrap_or(0);
 
         let mut fields = None;
+        let mut schema_ref = None;
         let after_bracket = &content[bracket_end + 1..];
         if after_bracket.starts_with('{') {
             if let Some(brace_end) = after_bracket.find('}') {
@@ -433,13 +449,19 @@ impl<'alloc> BorrowedDecoder<'alloc> {
                 let parts = self.helper.split_top_level(fields_str, delimiter);
                 fields = Some(parts.into_iter().map(|s| s.trim()).collect());
             }
+        } else if after_bracket.starts_with("@s:") || after_bracket.starts_with("@r:") || after_bracket.starts_with("@sec:") {
+            let ref_start = 1;
+            let ref_end = after_bracket[ref_start..].find(':').map(|p| p + ref_start)?;
+            let after_type = ref_end + 1;
+            let name_end = after_bracket[after_type..].find(':').map(|p| p + after_type).unwrap_or(after_bracket.len());
+            schema_ref = Some(after_bracket[1..name_end].trim());
         }
 
         let colon_pos = content.rfind(':')?;
         let after_colon = content[colon_pos + 1..].trim();
         let inline_values = if !after_colon.is_empty() { Some(after_colon) } else { None };
 
-        Some(ArrayHeader { key, length, delimiter, fields, inline_values })
+        Some(ArrayHeader { key, length, delimiter, fields, schema_ref, inline_values })
     }
 
     fn parse_key<'a>(&mut self, content: &'a str) -> Result<(&'a str, usize), String>

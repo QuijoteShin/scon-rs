@@ -44,7 +44,7 @@ pub struct Decoder {
     indent: usize,
     indent_auto_detect: bool,
     scratch: String, // Shared unescape buffer — capacity reused across calls, avoids per-string allocation
-    registry: SchemaRegistry,
+    pub(crate) registry: SchemaRegistry,
 }
 
 impl Decoder {
@@ -350,7 +350,9 @@ impl Decoder {
                 while j < lines.len() && lines[j].depth >= child_depth {
                     if lines[j].depth == child_depth && lines[j].content.starts_with("- ") {
                         let item_content = &lines[j].content[2..];
-                        if item_content.contains(':') {
+                        if self.is_reference_token(item_content) {
+                            items.push(self.parse_inline_value(item_content));
+                        } else if item_content.contains(':') {
                             let (obj, next_j) = self.decode_list_item_object(&lines[j], lines, j, base_depth)?;
                             items.push(Value::Object(obj));
                             j = next_j;
@@ -389,9 +391,22 @@ impl Decoder {
             }
         }
 
-        //Tabular
+        //Tabular — explicit fields or schema ref
         if let Some(ref fields) = header.fields {
             return self.decode_tabular_array(index, lines, header.length, fields, header.delimiter);
+        }
+        if let Some(ref_str) = header.schema_ref {
+            // ref_str = "s:Name" or "r:Name" — split type:name
+            if let Some(colon) = ref_str.find(':') {
+                let type_prefix = &ref_str[..colon];
+                let name = &ref_str[colon + 1..];
+                if let Some(def_type) = crate::schema_registry::DefType::from_prefix(type_prefix) {
+                    let field_names = self.registry.tabular_fields(def_type, name)?;
+                    let fields_str: Vec<&str> = field_names.iter().map(|s| s.as_str()).collect();
+                    return self.decode_tabular_array(index, lines, header.length, &fields_str, header.delimiter);
+                }
+            }
+            return Err(format!("Invalid tabular schema ref: @{}", ref_str));
         }
 
         //Expanded
@@ -441,6 +456,8 @@ impl Decoder {
                     } else if let Some(ref inline) = header.inline_values {
                         result.push(Value::Array(self.parse_delimited_values(inline, header.delimiter)));
                     }
+                } else if self.is_reference_token(item_content) {
+                    result.push(self.parse_inline_value(item_content));
                 } else if item_content.contains(':') {
                     let (obj, next_i) = self.decode_list_item_object(line, lines, i, base_depth)?;
                     result.push(Value::Object(obj));
@@ -563,8 +580,9 @@ impl Decoder {
 
         let length: usize = bracket_content.parse().unwrap_or(0);
 
-        //Fields {field1,field2} — split_top_level ya retorna &str slices
+        //Fields {field1,field2} or @s:SchemaName — after the closing bracket
         let mut fields = None;
+        let mut schema_ref = None;
         let after_bracket = &content[bracket_end + 1..];
         if after_bracket.starts_with('{') {
             if let Some(brace_end) = after_bracket.find('}') {
@@ -572,6 +590,13 @@ impl Decoder {
                 let parts = self.split_top_level(fields_str, delimiter);
                 fields = Some(parts.into_iter().map(|s| s.trim()).collect());
             }
+        } else if after_bracket.starts_with("@s:") || after_bracket.starts_with("@r:") || after_bracket.starts_with("@sec:") {
+            // Tabular schema ref: key[N]@s:SchemaName:
+            let ref_start = 1; // skip '@'
+            let ref_end = after_bracket[ref_start..].find(':').map(|p| p + ref_start)?;
+            let after_type = ref_end + 1; // skip the type colon
+            let name_end = after_bracket[after_type..].find(':').map(|p| p + after_type).unwrap_or(after_bracket.len());
+            schema_ref = Some(after_bracket[1..name_end].trim()); // "s:Name" or "r:Name"
         }
 
         //Inline values after : — slice del content, no copia
@@ -583,7 +608,7 @@ impl Decoder {
             None
         };
 
-        Some(ArrayHeader { key, length, delimiter, fields, inline_values })
+        Some(ArrayHeader { key, length, delimiter, fields, schema_ref, inline_values })
     }
 
     fn parse_key(&mut self, content: &str) -> Result<(CompactString, usize), String> {
@@ -745,6 +770,12 @@ impl Decoder {
         }
 
         Value::String(CompactString::from(t))
+    }
+
+    #[inline]
+    fn is_reference_token(&self, token: &str) -> bool {
+        let t = token.trim_start();
+        t.starts_with("@s:") || t.starts_with("@r:") || t.starts_with("@sec:")
     }
 
     // Manual number parser — byte accumulator for integers, stdlib fallback for floats.
@@ -1071,14 +1102,16 @@ struct ParsedLine<'a> {
 }
 
 // Array header parsed from "key[N]{f1,f2,...}: values" — all fields borrow from input.
-// Supports three array formats:
-//   Inline:   key[3]: a, b, c           (fields=None, inline_values=Some)
-//   Tabular:  key[N]{f1,f2,...}:         (fields=Some, inline_values=None, followed by N rows)
-//   Expanded: key[N]:                    (fields=None, inline_values=None, followed by "- " items)
+// Supports four array formats:
+//   Inline:   key[3]: a, b, c              (fields=None, inline_values=Some)
+//   Tabular:  key[N]{f1,f2,...}:            (fields=Some, inline_values=None, followed by N rows)
+//   TabRef:   key[N]@s:SchemaName:          (schema_ref=Some, resolved to fields from registry)
+//   Expanded: key[N]:                       (fields=None, inline_values=None, followed by "- " items)
 struct ArrayHeader<'a> {
     key: Option<&'a str>,
     length: usize,
     delimiter: char,
     fields: Option<Vec<&'a str>>,
+    schema_ref: Option<&'a str>,
     inline_values: Option<&'a str>,
 }

@@ -116,3 +116,121 @@ fn encode_with_dedup_convenience() {
         assert_eq!(root.get("a"), root.get("b"));
     }
 }
+
+#[test]
+fn auto_extract_name_collisions_roundtrip_stable() {
+    let params_a = obj(vec![
+        ("type", s("string")),
+        ("required", Value::Bool(true)),
+    ]);
+    let params_b = obj(vec![
+        ("type", s("integer")),
+        ("minimum", Value::Integer(0)),
+    ]);
+    let data = obj(vec![
+        ("endpoint1", obj(vec![("parameters", params_a.clone())])),
+        ("endpoint2", obj(vec![("parameters", params_a)])),
+        ("service1", obj(vec![("parameters", params_b.clone())])),
+        ("service2", obj(vec![("parameters", params_b)])),
+    ]);
+
+    let encoded = Encoder::new().with_auto_extract(true).encode(&data);
+    assert!(encoded.contains("s:parameters_"), "Colliding auto schemas should be suffixed");
+
+    let decoded = decode(&encoded).unwrap();
+    let re_encoded = Encoder::new().with_auto_extract(true).encode(&decoded);
+    assert_eq!(re_encoded, encoded);
+}
+
+#[test]
+fn decode_resolves_reference_list_items() {
+    let scon = concat!(
+        "s:rule_plan {attribute:plan, operator:in, values:[pro, enterprise]}\n",
+        "s:rule_country {attribute:country, operator:eq, value:US}\n",
+        "targeting_rules[2]:\n",
+        " - @s:rule_plan\n",
+        " - @s:rule_country\n",
+    );
+
+    let decoded = decode(scon).unwrap();
+    let expected = obj(vec![(
+        "targeting_rules",
+        Value::Array(vec![
+            obj(vec![
+                ("attribute", s("plan")),
+                ("operator", s("in")),
+                ("values", Value::Array(vec![s("pro"), s("enterprise")])),
+            ]),
+            obj(vec![
+                ("attribute", s("country")),
+                ("operator", s("eq")),
+                ("value", s("US")),
+            ]),
+        ]),
+    )]);
+
+    assert_eq!(decoded, expected);
+}
+
+#[test]
+fn auto_extract_expanded_array_refs_roundtrip_stable() {
+    let data = obj(vec![(
+        "feature_flags",
+        Value::Array(vec![
+            obj(vec![
+                ("flag_name", s("feature.a")),
+                ("targeting_rules", Value::Array(vec![
+                    obj(vec![
+                        ("attribute", s("plan")),
+                        ("operator", s("in")),
+                        ("values", Value::Array(vec![s("pro"), s("enterprise")])),
+                    ]),
+                    obj(vec![
+                        ("attribute", s("country")),
+                        ("operator", s("eq")),
+                        ("value", s("US")),
+                    ]),
+                ])),
+            ]),
+            obj(vec![
+                ("flag_name", s("feature.b")),
+                ("targeting_rules", Value::Array(vec![
+                    obj(vec![
+                        ("attribute", s("plan")),
+                        ("operator", s("in")),
+                        ("values", Value::Array(vec![s("pro"), s("enterprise")])),
+                    ]),
+                    obj(vec![
+                        ("attribute", s("country")),
+                        ("operator", s("eq")),
+                        ("value", s("CL")),
+                    ]),
+                ])),
+            ]),
+            obj(vec![
+                ("flag_name", s("feature.c")),
+                ("targeting_rules", Value::Array(vec![
+                    obj(vec![
+                        ("attribute", s("plan")),
+                        ("operator", s("in")),
+                        ("values", Value::Array(vec![s("pro"), s("enterprise")])),
+                    ]),
+                    obj(vec![
+                        ("attribute", s("country")),
+                        ("operator", s("eq")),
+                        ("value", s("US")),
+                    ]),
+                ])),
+            ]),
+        ]),
+    )]);
+
+    let encoded = Encoder::new().with_auto_extract(true).encode(&data);
+    assert!(encoded.contains("- @s:"), "Expanded arrays should reuse extracted schemas");
+
+    let decoded = decode(&encoded).unwrap();
+    assert_eq!(decoded, data);
+
+    let re_encoded = Encoder::new().with_auto_extract(true).encode(&decoded);
+    assert_eq!(re_encoded, encoded);
+}
